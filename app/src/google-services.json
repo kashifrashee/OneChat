@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "646137526831",
+    "project_id": "onechat-4f2d0",
+    "storage_bucket": "onechat-4f2d0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:646137526831:android:36d83c3d3de317948624da",
+        "android_client_info": {
+          "package_name": "com.example.onechat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNPg2vq5l9RgP9xAW3UeBAW5_YuxGtRqg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
