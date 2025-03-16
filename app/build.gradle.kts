@@ -63,4 +63,8 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 
     implementation("androidx.core:core-splashscreen:1.0.1")
+
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
+
+    implementation("com.google.accompanist:accompanist-swiperefresh:0.31.2-alpha")
 }

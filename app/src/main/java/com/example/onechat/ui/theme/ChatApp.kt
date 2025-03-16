@@ -154,7 +154,8 @@ fun ChatScreen(
                                 "message" to messageText.text,
                                 "senderId" to currentUser?.uid,
                                 "receiverId" to receiverId,
-                                "timestamp" to com.google.firebase.Timestamp.now()
+                                "timestamp" to com.google.firebase.Timestamp.now(),
+                                "isRead" to false  // 🔥 New field to track read status
                             )
 
                             // ✅ Add Message to Firestore

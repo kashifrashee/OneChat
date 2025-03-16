@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -44,8 +46,11 @@ import androidx.navigation.NavController
 import com.example.onechat.LoginDestination
 import com.example.onechat.NavigationDestination
 import com.example.onechat.R
+import com.google.accompanist.swiperefresh.SwipeRefresh
+import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import kotlin.math.absoluteValue
@@ -83,15 +88,23 @@ fun UserListScreen(navController: NavController) {
 
     var users by remember { mutableStateOf<List<User>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
-    val context = LocalContext.current
+    var isRefreshing by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
 
-    // Firestore Listener for real-time updates
+    // Load initial users
     LaunchedEffect(Unit) {
-        if (currentUser != null) {
-            listenForUserUpdates(db, auth, currentUser) { updatedUsers ->
-                users = updatedUsers
-                isLoading = false
-            }
+        listenForUserUpdates(db, auth, currentUser) { newUsers ->
+            users = newUsers
+            isLoading = false
+        }
+    }
+
+    // Refresh function when pulling down
+    fun refreshUsers() {
+        isRefreshing = true
+        listenForUserUpdates(db, auth, currentUser) { newUsers ->
+            users = newUsers
+            isRefreshing = false
         }
     }
 
@@ -123,35 +136,42 @@ fun UserListScreen(navController: NavController) {
             }
         }
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(16.dp)
+        SwipeRefresh(
+            state = rememberSwipeRefreshState(isRefreshing),
+            onRefresh = { refreshUsers() }
         ) {
-            if (isLoading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-            } else {
-                if (users.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(16.dp)
+            ) {
+                if (isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No users available", color = Color.Gray, fontSize = 18.sp)
+                        CircularProgressIndicator()
                     }
                 } else {
-                    LazyColumn {
-                        items(users) { user ->
-                            UserItem(user) {
-                                val senderId = currentUser?.uid ?: return@UserItem
-                                val receiverId = user.uid
-                                val chatId = getChatId(senderId, receiverId)
+                    if (users.isEmpty()) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("No users available", color = Color.Gray, fontSize = 18.sp)
+                        }
+                    } else {
+                        LazyColumn(state = listState) {
+                            items(users) { user ->
+                                UserItem(user) {
+                                    val senderId = currentUser?.uid ?: return@UserItem
+                                    val receiverId = user.uid
+                                    val chatId = getChatId(senderId, receiverId)
 
-                                Log.d(
-                                    "UserListScreen",
-                                    "Navigating to chat_screen/$chatId/$receiverId/${user.email}"
-                                )
+                                    markMessagesAsRead(db, chatId, senderId)
 
-                                navController.navigate("chat_screen/$chatId/$receiverId/${user.email}")
+                                    Log.d(
+                                        "UserListScreen",
+                                        "Navigating to chat_screen/$chatId/$receiverId/${user.email}"
+                                    )
+
+                                    navController.navigate("chat_screen/$chatId/$receiverId/${user.email}")
+                                }
                             }
                         }
                     }
@@ -162,77 +182,92 @@ fun UserListScreen(navController: NavController) {
 }
 
 
-// ✅ Firestore Listener for real-time updates
 fun listenForUserUpdates(
     db: FirebaseFirestore,
     auth: FirebaseAuth,
     currentUser: FirebaseUser?,
     onUsersFetched: (List<User>) -> Unit
 ) {
-    Log.d("UserListScreen", "Listening for Firestore updates...")
+    Log.d("UserListScreen", "Fetching latest users...")
 
     val usersRef = db.collection("users")
-    val chatsRef = db.collection("chats")
 
-    usersRef.addSnapshotListener { userSnapshot, userError ->
-        if (userError != null) {
-            Log.e("UserListScreen", "Error fetching users", userError)
-            return@addSnapshotListener
-        }
+    usersRef.get()
+        .addOnSuccessListener { userSnapshot ->
+            if (userSnapshot.isEmpty) {
+                onUsersFetched(emptyList())  // 🔥 Ensure callback is called
+                return@addOnSuccessListener
+            }
 
-        if (userSnapshot == null || userSnapshot.isEmpty) {
-            onUsersFetched(emptyList())
-            return@addSnapshotListener
-        }
+            val userList = mutableListOf<User>()
+            var usersProcessed = 0
+            val totalUsers = userSnapshot.documents.size - 1  // Exclude current user
 
-        val userList = mutableListOf<User>()
-        var usersProcessed = 0
+            for (userDoc in userSnapshot.documents) {
+                val userId = userDoc.id
+                if (userId == currentUser?.uid) continue  // Skip current user
 
-        for (userDoc in userSnapshot.documents) {
-            val userId = userDoc.id
-            if (userId == currentUser?.uid) continue
+                val user = User(
+                    uid = userId,
+                    email = userDoc.getString("email") ?: "",
+                    lastMessage = null,
+                    lastMessageTimestamp = 0L,
+                    isUnread = false  // 🔥 Default to false
+                )
 
-            val user = User(
-                uid = userId,
-                email = userDoc.getString("email") ?: "",
-                lastMessage = null,
-                lastMessageTimestamp = 0L,
-                isUnread = false
-            )
+                val chatId = getChatId(currentUser?.uid, userId)
+                Log.d("UserListScreen", "Fetching last message for chatId: $chatId")
 
-            val chatId = getChatId(currentUser?.uid, userId)
-            Log.d("UserListScreen", "Setting up real-time listener for chatId: $chatId")
+                db.collection("chats").document(chatId).collection("messages")
+                    .orderBy("timestamp", Query.Direction.DESCENDING)
+                    .limit(1)
+                    .get()
+                    .addOnSuccessListener { chatSnapshot ->
+                        if (!chatSnapshot.isEmpty) {
+                            val lastMessageDoc = chatSnapshot.documents.first()
+                            user.lastMessage = lastMessageDoc.getString("message") ?: ""
+                            user.lastMessageTimestamp = lastMessageDoc.getTimestamp("timestamp")?.seconds ?: 0L
+                        }
 
-            chatsRef.document(chatId).collection("messages")
-                .orderBy("timestamp", Query.Direction.DESCENDING)
-                .limit(1)
-                .addSnapshotListener { chatSnapshot, chatError ->
-                    if (chatError != null) {
-                        Log.e("UserListScreen", "Error fetching messages for chatId: $chatId", chatError)
-                        return@addSnapshotListener
+                        // 🔥 Check unread messages
+                        db.collection("chats").document(chatId).collection("messages")
+                            .whereEqualTo("receiverId", currentUser?.uid)
+                            .whereEqualTo("isRead", false)
+                            .get()
+                            .addOnSuccessListener { unreadSnapshot ->
+                                user.isUnread = !unreadSnapshot.isEmpty
+                                Log.d("UserListScreen", "Unread status for ${user.email}: ${user.isUnread}")
+                                userList.add(user)
+                                usersProcessed++
+
+                                if (usersProcessed == totalUsers) {
+                                    Log.d("UserListScreen", "All users processed, updating UI")
+                                    val updatedList = userList.sortedByDescending { it.lastMessageTimestamp }
+                                    onUsersFetched(updatedList)  // ✅ Ensure callback is called
+                                }
+                            }
                     }
-
-                    if (chatSnapshot != null && !chatSnapshot.isEmpty) {
-                        val lastMessageDoc = chatSnapshot.documents.first()
-                        user.lastMessage = lastMessageDoc.getString("message") ?: ""
-                        user.lastMessageTimestamp = lastMessageDoc.getTimestamp("timestamp")?.seconds ?: 0L
-                        user.isUnread = lastMessageDoc.getString("senderId") != currentUser?.uid
-
-                        Log.d("UserListScreen", "Real-time update for $userId: ${user.lastMessage}")
+                    .addOnFailureListener {
+                        usersProcessed++
+                        if (usersProcessed == totalUsers) {
+                            val updatedList = userList.sortedByDescending { it.lastMessageTimestamp }
+                            onUsersFetched(updatedList)  // ✅ Handle failures gracefully
+                        }
                     }
+            }
 
-                    // ✅ Instead of modifying the existing list, create a new list to force recomposition
-                    usersProcessed++
-                    userList.add(user)
-
-                    if (usersProcessed == userSnapshot.documents.size - 1) {
-                        val updatedList = userList.sortedByDescending { it.lastMessageTimestamp }
-                        onUsersFetched(updatedList) // 🔥 Pass a NEW list instance
-                    }
-                }
+            if (totalUsers == 0) {
+                onUsersFetched(emptyList())  // ✅ If no users exist, update UI immediately
+            }
         }
-    }
+        .addOnFailureListener { e ->
+            Log.e("UserListScreen", "Error fetching users", e)
+            onUsersFetched(emptyList())  // ✅ Handle Firestore errors properly
+        }
 }
+
+
+
 
 
 
@@ -291,6 +326,28 @@ fun UserItem(
 
 }
 
+
+fun markMessagesAsRead(db: FirebaseFirestore, chatId: String, currentUserId: String) {
+    val messagesRef = db.collection("chats").document(chatId).collection("messages")
+
+    messagesRef.whereEqualTo("receiverId", currentUserId)
+        .whereEqualTo("isRead", false)  // 🔥 Only update unread messages
+        .get()
+        .addOnSuccessListener { snapshot ->
+            val batch = db.batch()
+            for (doc in snapshot.documents) {
+                batch.update(doc.reference, "isRead", true)
+            }
+            batch.commit().addOnSuccessListener {
+                Log.d("UserListScreen", "Marked messages as read")
+            }.addOnFailureListener { e ->
+                Log.e("UserListScreen", "Failed to mark messages as read", e)
+            }
+        }
+        .addOnFailureListener { e ->
+            Log.e("UserListScreen", "Error fetching unread messages", e)
+        }
+}
 
 
 // Function to generate a random color based on user ID or email hash
